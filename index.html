@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>alimentary canon</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Georgia', 'Hiragino Mincho ProN', serif;
+      background: #f9f6f1;
+      color: #2a2a2a;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      max-width: 900px;
+      margin: 0 auto 2.5rem;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: normal;
+      letter-spacing: 0.05em;
+      color: #1a1a1a;
+    }
+
+    h1 span {
+      display: block;
+      font-size: 0.85rem;
+      color: #888;
+      margin-top: 0.3rem;
+      letter-spacing: 0.1em;
+      font-family: 'Helvetica Neue', sans-serif;
+    }
+
+    .controls {
+      max-width: 900px;
+      margin: 0 auto 1.2rem;
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    input[type="search"] {
+      padding: 0.5rem 0.8rem;
+      border: 1px solid #ccc;
+      background: #fff;
+      font-size: 0.9rem;
+      font-family: inherit;
+      width: 280px;
+      outline: none;
+      border-radius: 2px;
+    }
+
+    input[type="search"]:focus {
+      border-color: #888;
+    }
+
+    #count {
+      font-size: 0.85rem;
+      color: #888;
+      font-family: 'Helvetica Neue', sans-serif;
+      margin-left: auto;
+    }
+
+    .table-wrap {
+      max-width: 900px;
+      margin: 0 auto;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 2px solid #2a2a2a;
+      font-weight: normal;
+      font-family: 'Helvetica Neue', sans-serif;
+      font-size: 0.8rem;
+      letter-spacing: 0.08em;
+      color: #555;
+      cursor: pointer;
+      white-space: nowrap;
+      user-select: none;
+    }
+
+    th:hover { color: #1a1a1a; }
+
+    th.sorted-asc::after  { content: ' ↑'; }
+    th.sorted-desc::after { content: ' ↓'; }
+
+    td {
+      padding: 0.55rem 0.8rem;
+      border-bottom: 1px solid #e8e4de;
+      vertical-align: top;
+      line-height: 1.5;
+    }
+
+    tr:hover td { background: #f2ede6; }
+
+    td.vol  { color: #888; width: 3rem; text-align: right; }
+    td.year { color: #888; width: 5rem; white-space: nowrap; font-family: 'Helvetica Neue', sans-serif; font-size: 0.85rem; }
+
+    footer {
+      max-width: 900px;
+      margin: 3rem auto 0;
+      font-size: 0.8rem;
+      color: #aaa;
+      font-family: 'Helvetica Neue', sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>alimentary canon<span>the books that made me</span></h1>
+  </header>
+
+  <div class="controls">
+    <input type="search" id="search" placeholder="タイトル・著者・出版社で絞り込む">
+    <span id="count"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table id="booktable">
+      <thead>
+        <tr>
+          <th data-col="0">タイトル</th>
+          <th data-col="1" class="vol">巻</th>
+          <th data-col="2">著者</th>
+          <th data-col="3">出版社</th>
+          <th data-col="5" class="year">出版年</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <footer id="footer"></footer>
+
+  <script>
+    let allRows = [];
+    let sortCol = -1;
+    let sortAsc = true;
+
+    async function loadCSV() {
+      const res = await fetch('bookshelf.csv');
+      const text = await res.text();
+      allRows = parseCSV(text);
+      render(allRows);
+      document.getElementById('footer').textContent =
+        `alimentary canon — ${allRows.length} books`;
+    }
+
+    function parseCSV(text) {
+      const rows = [];
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        rows.push(parseCSVLine(line));
+      }
+      return rows;
+    }
+
+    function parseCSVLine(line) {
+      const cols = [];
+      let cur = '', inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (c === '"') {
+          if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+          else inQ = !inQ;
+        } else if (c === ',' && !inQ) {
+          cols.push(cur); cur = '';
+        } else {
+          cur += c;
+        }
+      }
+      cols.push(cur);
+      return cols;
+    }
+
+    function render(rows) {
+      const tbody = document.getElementById('tbody');
+      tbody.innerHTML = '';
+      rows.forEach(cols => {
+        const tr = document.createElement('tr');
+        const title = cols[0] || '';
+        const vol   = cols[1] || '';
+        const auth  = cols[2] || '';
+        const pub   = cols[3] || '';
+        const year  = (cols[5] || '').replace(/\.\d+$/, '');
+
+        tr.innerHTML =
+          `<td>${esc(title)}</td>` +
+          `<td class="vol">${esc(vol)}</td>` +
+          `<td>${esc(auth)}</td>` +
+          `<td>${esc(pub)}</td>` +
+          `<td class="year">${esc(year)}</td>`;
+        tbody.appendChild(tr);
+      });
+      document.getElementById('count').textContent = `${rows.length} 冊`;
+    }
+
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    document.getElementById('search').addEventListener('input', function() {
+      const q = this.value.toLowerCase();
+      if (!q) { render(allRows); return; }
+      const filtered = allRows.filter(cols =>
+        (cols[0]||'').toLowerCase().includes(q) ||
+        (cols[2]||'').toLowerCase().includes(q) ||
+        (cols[3]||'').toLowerCase().includes(q)
+      );
+      render(filtered);
+    });
+
+    document.querySelectorAll('th[data-col]').forEach(th => {
+      th.addEventListener('click', () => {
+        const col = parseInt(th.dataset.col);
+        if (sortCol === col) sortAsc = !sortAsc;
+        else { sortCol = col; sortAsc = true; }
+
+        document.querySelectorAll('th').forEach(t =>
+          t.classList.remove('sorted-asc','sorted-desc'));
+        th.classList.add(sortAsc ? 'sorted-asc' : 'sorted-desc');
+
+        const q = document.getElementById('search').value.toLowerCase();
+        let rows = q
+          ? allRows.filter(c =>
+              (c[0]||'').toLowerCase().includes(q) ||
+              (c[2]||'').toLowerCase().includes(q) ||
+              (c[3]||'').toLowerCase().includes(q))
+          : [...allRows];
+
+        rows.sort((a, b) => {
+          const av = (a[col]||'').toLowerCase();
+          const bv = (b[col]||'').toLowerCase();
+          return sortAsc ? av.localeCompare(bv, 'ja') : bv.localeCompare(av, 'ja');
+        });
+        render(rows);
+      });
+    });
+
+    loadCSV();
+  </script>
+</body>
+</html>
