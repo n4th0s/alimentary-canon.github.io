@@ -84,6 +84,12 @@
       margin-left: auto;
     }
 
+    #status {
+      font-size: 0.8rem;
+      color: #aaa;
+      font-family: 'Helvetica Neue', sans-serif;
+    }
+
     .grid {
       max-width: 960px;
       margin: 0 auto;
@@ -201,15 +207,15 @@
   <div class="controls">
     <input type="search" id="search" placeholder="タイトル・著者・出版社で絞り込む">
     <span id="count"></span>
+    <span id="status"></span>
   </div>
 
   <div class="grid" id="grid"></div>
-
   <footer id="footer"></footer>
 
   <script>
     let allBooks = [];
-    let coverMap = {};
+    const coverCache = new Map(); // isbn → url
 
     const CARD_COLORS = [
       '#d4c5b0','#b8c4d0','#c5b8d0','#cfd4b8','#b8d0c5',
@@ -222,109 +228,76 @@
       return CARD_COLORS[h % CARD_COLORS.length];
     }
 
-    /* ── OpenBD: 一括取得 ── */
-    async function fetchOpenBD(isbns) {
-      if (!isbns.length) return {};
-      try {
-        const res = await fetch(`https://api.openbd.jp/v1/get?isbn=${isbns.join(',')}`);
-        const data = await res.json();
-        const map = {};
-        data.forEach((item, i) => {
-          const cover = item?.summary?.cover;
-          if (cover) map[isbns[i]] = cover;
-        });
-        return map;
-      } catch { return {}; }
-    }
-
-    /* ── Google Books: スクロール時に個別取得 ── */
-    const gbObserver = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (!entry.isIntersecting) return;
-        gbObserver.unobserve(entry.target);
-        fetchGoogleCover(entry.target);
-      });
-    }, { rootMargin: '400px' });
-
-    async function fetchGoogleCover(card) {
-      const isbn = card.dataset.isbn;
-      if (!isbn) return;
-      try {
-        const res = await fetch(
-          `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&fields=items/volumeInfo/imageLinks`
-        );
-        const data = await res.json();
-        const thumb = data?.items?.[0]?.volumeInfo?.imageLinks?.thumbnail;
-        if (!thumb) return;
-
-        const wrap = card.querySelector('.cover-wrap');
-        const nocover = wrap?.querySelector('.no-cover');
-        if (!nocover) return;
-
-        const img = new Image();
-        img.className = 'gc-img';
-        img.alt = card.dataset.title || '';
-        img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
-        img.onload  = () => wrap.replaceChild(img, nocover);
-        img.onerror = () => {};
-        img.src = thumb.replace(/^http:/, 'https:').replace('zoom=1', 'zoom=2');
-      } catch {}
-    }
-
-    /* ── CSV ── */
-    async function loadCSV() {
-      const res = await fetch('bookshelf.csv');
-      const text = await res.text();
-      allBooks = parseCSV(text);
-
-      const isbns = allBooks.map(cols => (cols[6] || '').trim()).filter(Boolean);
-      coverMap = await fetchOpenBD(isbns);
-
-      render(allBooks);
-      document.getElementById('footer').textContent =
-        `alimentary canon — ${allBooks.length} books`;
-    }
-
-    function parseCSV(text) {
-      const rows = [];
-      for (const line of text.split('\n')) {
-        if (line.trim()) rows.push(parseCSVLine(line));
-      }
-      return rows;
-    }
-
-    function parseCSVLine(line) {
-      const cols = [];
-      let cur = '', inQ = false;
-      for (let i = 0; i < line.length; i++) {
-        const c = line[i];
-        if (c === '"') {
-          if (inQ && line[i+1] === '"') { cur += '"'; i++; }
-          else inQ = !inQ;
-        } else if (c === ',' && !inQ) {
-          cols.push(cur); cur = '';
-        } else { cur += c; }
-      }
-      cols.push(cur);
-      return cols;
-    }
-
     function esc(s) {
       return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
         .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
+    /* ── Google Books JSONP チャンク取得 ── */
+    function fetchGBChunk(isbns) {
+      return new Promise(resolve => {
+        const cb = '__gb' + Math.random().toString(36).slice(2, 9);
+        window[cb] = data => {
+          delete window[cb];
+          script.remove();
+          for (const [key, val] of Object.entries(data)) {
+            if (!val.thumbnail_url) continue;
+            const isbn = key.replace('ISBN:', '');
+            setCover(isbn, val.thumbnail_url);
+          }
+          resolve();
+        };
+        const script = document.createElement('script');
+        script.onerror = () => { delete window[cb]; script.remove(); resolve(); };
+        const bibkeys = isbns.map(i => 'ISBN:' + i).join(',');
+        script.src = `https://books.google.com/books?bibkeys=${bibkeys}&jscmd=viewapi&callback=${cb}`;
+        document.head.appendChild(script);
+      });
+    }
+
+    async function loadAllCovers(isbns) {
+      const CHUNK = 50;
+      const chunks = [];
+      for (let i = 0; i < isbns.length; i += CHUNK) {
+        chunks.push(isbns.slice(i, i + CHUNK));
+      }
+      let done = 0;
+      const statusEl = document.getElementById('status');
+      const update = () => {
+        done++;
+        if (done >= chunks.length) statusEl.textContent = '';
+        else statusEl.textContent = `書影読込中… ${Math.round(done/chunks.length*100)}%`;
+      };
+      statusEl.textContent = '書影読込中… 0%';
+      await Promise.all(chunks.map(chunk => fetchGBChunk(chunk).then(update)));
+    }
+
+    /* ── カード更新 ── */
+    function setCover(isbn, url) {
+      coverCache.set(isbn, url);
+      const card = document.querySelector(`.book-card[data-isbn="${isbn}"]`);
+      if (!card) return;
+      const wrap = card.querySelector('.cover-wrap');
+      const nocover = wrap?.querySelector('.no-cover');
+      if (!nocover) return;
+      const img = document.createElement('img');
+      img.alt   = card.dataset.title || '';
+      img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+      img.onload  = () => wrap.replaceChild(img, nocover);
+      img.onerror = () => {};
+      img.src = url;
+    }
+
+    /* ── カード生成 ── */
     function makeNoCover(title, vol, author) {
       const displayTitle = vol ? `${title} ${vol}巻` : title;
       const div = document.createElement('div');
       div.className = 'no-cover';
       div.style.background = cardColor(title);
-
       const t = document.createElement('div');
       t.className = 'nc-title';
       t.textContent = displayTitle;
       div.appendChild(t);
-
       if (author) {
         const a = document.createElement('div');
         a.className = 'nc-author';
@@ -342,32 +315,23 @@
       const year   = (cols[5] || '').replace(/\.\d+$/, '');
       const isbn   = (cols[6] || '').trim();
       const displayTitle = vol ? `${title} ${vol}巻` : title;
-      const coverUrl = isbn ? coverMap[isbn] : null;
 
       const card = document.createElement('div');
       card.className = 'book-card';
-      if (isbn) {
-        card.dataset.isbn  = isbn;
-        card.dataset.title = displayTitle;
-      }
+      if (isbn) { card.dataset.isbn = isbn; card.dataset.title = displayTitle; }
 
       const wrap = document.createElement('div');
       wrap.className = 'cover-wrap';
 
-      if (coverUrl) {
+      const cachedUrl = isbn ? coverCache.get(isbn) : null;
+      if (cachedUrl) {
         const img = document.createElement('img');
-        img.alt     = displayTitle;
-        img.loading = 'lazy';
-        img.src     = coverUrl;
-        img.onerror = () => {
-          const nc = makeNoCover(title, vol, author);
-          wrap.replaceChild(nc, img);
-          if (isbn) gbObserver.observe(card);
-        };
+        img.alt = displayTitle;
+        img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+        img.src = cachedUrl;
         wrap.appendChild(img);
       } else {
         wrap.appendChild(makeNoCover(title, vol, author));
-        if (isbn) gbObserver.observe(card);
       }
 
       const tooltip = document.createElement('div');
@@ -381,6 +345,7 @@
       return card;
     }
 
+    /* ── レンダリング ── */
     function render(books) {
       const grid = document.getElementById('grid');
       grid.innerHTML = '';
@@ -388,6 +353,31 @@
       document.getElementById('count').textContent = `${books.length} 冊`;
     }
 
+    /* ── CSV ── */
+    function parseCSV(text) {
+      const rows = [];
+      for (const line of text.split('\n')) {
+        if (line.trim()) rows.push(parseCSVLine(line));
+      }
+      return rows;
+    }
+
+    function parseCSVLine(line) {
+      const cols = [];
+      let cur = '', inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (c === '"') {
+          if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+          else inQ = !inQ;
+        } else if (c === ',' && !inQ) { cols.push(cur); cur = ''; }
+        else { cur += c; }
+      }
+      cols.push(cur);
+      return cols;
+    }
+
+    /* ── 検索 ── */
     document.getElementById('search').addEventListener('input', function() {
       const q = this.value.toLowerCase();
       if (!q) { render(allBooks); return; }
@@ -398,7 +388,19 @@
       ));
     });
 
-    loadCSV();
+    /* ── 起動 ── */
+    async function init() {
+      const res = await fetch('bookshelf.csv');
+      const text = await res.text();
+      allBooks = parseCSV(text);
+      render(allBooks);
+      document.getElementById('footer').textContent = `alimentary canon — ${allBooks.length} books`;
+
+      const isbns = allBooks.map(cols => (cols[6] || '').trim()).filter(Boolean);
+      await loadAllCovers(isbns);
+    }
+
+    init();
   </script>
 </body>
 </html>
